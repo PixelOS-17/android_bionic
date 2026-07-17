@@ -632,6 +632,7 @@ static const char* const kSepolicyFilterPaths[] = {
 };
 
 int custom_rom_hide_filter_sepolicy(const char* path) {
+    if (!path) return -1;
     if (!is_app_process()) return -1;
     if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return -1;
 
