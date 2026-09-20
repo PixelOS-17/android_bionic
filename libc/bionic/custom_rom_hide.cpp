@@ -28,6 +28,7 @@
 #include <sys/statfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
+#include <sys/system_properties.h>
 #include <unistd.h>
 #include <private/android_filesystem_config.h>
 
@@ -732,6 +733,27 @@ static const PropOverride kSpoofedValueProps[] = {
     {nullptr, nullptr}
 };
 
+// ro.product.* keys that mirror whatever AxSpoofManager staged into the
+// matching persist.sys.pif.product.* prop after a fingerprint refresh.
+// Unlike kSpoofedValueProps these have no fixed value — read at call time,
+// and only applied when the staging prop is actually set (empty = no PIF
+// config loaded yet, so don't blank out the real device identity).
+struct DynamicPropOverride { const char* name; const char* staging_name; };
+static const DynamicPropOverride kDynamicProductProps[] = {
+    {"ro.product.manufacturer",        "persist.sys.pif.product.manufacturer"},
+    {"ro.product.brand",               "persist.sys.pif.product.brand"},
+    {"ro.product.model",               "persist.sys.pif.product.model"},
+    {"ro.product.device",              "persist.sys.pif.product.device"},
+    {"ro.product.name",                "persist.sys.pif.product.name"},
+    {"ro.product.system.manufacturer", "persist.sys.pif.product.manufacturer"},
+    {"ro.product.system.brand",        "persist.sys.pif.product.brand"},
+    {"ro.product.system.model",        "persist.sys.pif.product.model"},
+    {"ro.product.vendor.manufacturer", "persist.sys.pif.product.manufacturer"},
+    {"ro.product.vendor.brand",        "persist.sys.pif.product.brand"},
+    {"ro.product.vendor.model",        "persist.sys.pif.product.model"},
+    {nullptr, nullptr}
+};
+
 bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
     if (!name || !value) return false;
     if (reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
@@ -760,6 +782,14 @@ const char* custom_rom_hide_get_prop_override(const char* name) {
     if (!is_app_process()) return nullptr;
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) return o->value;
+    }
+    for (const DynamicPropOverride* o = kDynamicProductProps; o->name; ++o) {
+        if (strcmp(name, o->name) == 0) {
+            static thread_local char buf[PROP_VALUE_MAX];
+            int len = __system_property_get(o->staging_name, buf);
+            if (len > 0) return buf;
+            return nullptr; // staging prop unset — leave the real value alone
+        }
     }
     return nullptr;
 }
