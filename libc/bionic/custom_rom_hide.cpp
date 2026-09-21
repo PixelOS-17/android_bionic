@@ -777,7 +777,7 @@ bool custom_rom_hide_should_hide_prop(const char* name) {
     return false;
 }
 
-const char* custom_rom_hide_get_prop_override(const char* name) {
+const char* custom_rom_hide_get_prop_override(const char* name, char* buffer) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return nullptr;
     if (!is_app_process()) return nullptr;
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
@@ -785,9 +785,10 @@ const char* custom_rom_hide_get_prop_override(const char* name) {
     }
     for (const DynamicPropOverride* o = kDynamicProductProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) {
-            static thread_local char buf[PROP_VALUE_MAX];
-            int len = __system_property_get(o->staging_name, buf);
-            if (len > 0) return buf;
+            // This code is also linked into the loader, which cannot contain ELF TLS.
+            // The caller owns a PROP_VALUE_MAX buffer for the duration of the read.
+            int len = __system_property_get(o->staging_name, buffer);
+            if (len > 0) return buffer;
             return nullptr; // staging prop unset — leave the real value alone
         }
     }

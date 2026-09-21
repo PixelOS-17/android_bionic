@@ -44,7 +44,8 @@ int custom_rom_hide_filter_sepolicy(const char* path);
 
 bool custom_rom_hide_should_spoof_prop(const char* name, char* value);
 bool custom_rom_hide_should_hide_prop(const char* name);
-const char* custom_rom_hide_get_prop_override(const char* name);
+// buffer must hold PROP_VALUE_MAX bytes; a dynamic result remains valid while buffer lives.
+const char* custom_rom_hide_get_prop_override(const char* name, char* buffer);
 
 ssize_t custom_rom_hide_readlink_post(char* buf, size_t size, ssize_t ret);
 

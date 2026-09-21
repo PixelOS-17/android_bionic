@@ -106,7 +106,8 @@ static void read_callback_intercept(void* cookie, const char* name, const char* 
         return;
     }
 
-    const char* override_val = custom_rom_hide_get_prop_override(name);
+    char override_buffer[PROP_VALUE_MAX];
+    const char* override_val = custom_rom_hide_get_prop_override(name, override_buffer);
     if (override_val) {
         uint32_t len = strlen(override_val);
         uint32_t fake_serial = serial;
@@ -177,7 +178,8 @@ uint32_t __system_property_serial(const prop_info* pi) {
       return is_ro ? 0 : (real_serial & 0xffffff);
   }
 
-  const char* override_val = custom_rom_hide_get_prop_override(name);
+  char override_buffer[PROP_VALUE_MAX];
+  const char* override_val = custom_rom_hide_get_prop_override(name, override_buffer);
   if (override_val) {
       uint32_t len = strlen(override_val);
       if (is_ro) {
