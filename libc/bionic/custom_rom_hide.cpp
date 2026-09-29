@@ -212,6 +212,50 @@ static bool is_app_process() {
     return result;
 }
 
+// Dynamic prop overrides are only meant for DroidGuard, mirroring PIFork's scope.
+// The process name is only final once ActivityThread has called Process.setArgV0(),
+// before that cmdline still reads "zygote*" or "<pre-initialized>". Only cache
+// once it is final so an early read can't pin the wrong answer for this pid.
+#define DROIDGUARD_PROCESS_NAME "com.google.android.gms.unstable"
+
+static bool compute_droidguard(bool* resolved) {
+    *resolved = false;
+
+    int fd = raw_openat("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) return false;
+
+    char cmdline[256];
+    ssize_t n = raw_read(fd, cmdline, sizeof(cmdline) - 1);
+    raw_close(fd);
+    if (n <= 0) return false;
+
+    cmdline[n] = '\0';
+    if (strncmp(cmdline, "zygote", 6) == 0 || strcmp(cmdline, "<pre-initialized>") == 0) {
+        return false;
+    }
+
+    *resolved = true;
+    return strcmp(cmdline, DROIDGUARD_PROCESS_NAME) == 0;
+}
+
+static bool is_droidguard_process() {
+    static _Atomic(pid_t) cached_pid = -1;
+    static _Atomic(bool) cached_value = false;
+
+    pid_t cur = getpid();
+    if (atomic_load_explicit(&cached_pid, memory_order_acquire) == cur) {
+        return atomic_load_explicit(&cached_value, memory_order_acquire);
+    }
+
+    bool resolved = false;
+    bool result = compute_droidguard(&resolved);
+    if (resolved) {
+        atomic_store_explicit(&cached_value, result, memory_order_release);
+        atomic_store_explicit(&cached_pid, cur, memory_order_release);
+    }
+    return result;
+}
+
 static const char* path_basename(const char* path) {
     const char* slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
@@ -728,16 +772,30 @@ static const PropOverride kSpoofedValueProps[] = {
     {"ro.debuggable", "0"},
     {"ro.build.type", "user"},
     {"ro.build.tags", "release-keys"},
+    {"ro.system.build.type", "user"},
+    {"ro.system.build.tags", "release-keys"},
+    {"ro.vendor.build.type", "user"},
+    {"ro.vendor.build.tags", "release-keys"},
     {"ro.secure", "1"},
     {"ro.adb.secure", "1"},
+    // Boot state as stock reports it on a locked device, matching the cmdline
+    // rewrite in filter_cmdline(). App processes only (see is_app_process()), so
+    // system_server's OemLock/PersistentDataBlock checks still see the real state.
+    {"ro.boot.verifiedbootstate", "green"},
+    {"vendor.boot.verifiedbootstate", "green"},
+    {"ro.boot.vbmeta.device_state", "locked"},
+    {"vendor.boot.vbmeta.device_state", "locked"},
+    {"ro.boot.flash.locked", "1"},
+    {"ro.boot.veritymode", "enforcing"},
+    {"ro.secureboot.lockstate", "locked"},
     {nullptr, nullptr}
 };
 
-// ro.product.* keys that mirror whatever AxSpoofManager staged into the
-// matching persist.sys.pif.product.* prop after a fingerprint refresh.
-// Unlike kSpoofedValueProps these have no fixed value — read at call time,
-// and only applied when the staging prop is actually set (empty = no PIF
-// config loaded yet, so don't blank out the real device identity).
+// Read-only keys that mirror whatever AxSpoofManager staged into the matching
+// persist.sys.pif.* prop after a fingerprint refresh. Unlike kSpoofedValueProps
+// these have no fixed value — read at call time, only applied when the staging
+// prop is actually set (empty = no PIF config loaded yet, so don't blank out the
+// real device identity), and only served to the DroidGuard process.
 struct DynamicPropOverride { const char* name; const char* staging_name; };
 static const DynamicPropOverride kDynamicProductProps[] = {
     {"ro.product.manufacturer",        "persist.sys.pif.product.manufacturer"},
@@ -754,11 +812,117 @@ static const DynamicPropOverride kDynamicProductProps[] = {
     {nullptr, nullptr}
 };
 
+// PIFork's leading-* wildcard properties: every read-only prop ending in the
+// suffix is served the same staged value, so partitions the table above would
+// have to list one by one (vendor_dlkm, odm, bootimage, ...) are covered as
+// well. Only "ro." keys match. That also keeps the persist.sys.pif.* staging
+// props themselves out of the match, which end in these suffixes too and
+// would send the staging read back through this lookup.
+struct DynamicSuffixOverride { const char* suffix; size_t suffix_len; const char* staging_name; };
+#define DYNAMIC_SUFFIX(suffix, staging) { suffix, sizeof(suffix) - 1, staging }
+static const DynamicSuffixOverride kDynamicSuffixProps[] = {
+    DYNAMIC_SUFFIX(".build.id",        "persist.sys.pif.build.id"),
+    DYNAMIC_SUFFIX(".security_patch",  "persist.sys.pif.security_patch"),
+    DYNAMIC_SUFFIX("api_level",        "persist.sys.pif.api_level"),
+    {nullptr, 0, nullptr}
+};
+
+// Fixed values served to DroidGuard only, as PIFork's property hook does. adbd
+// and USB state are read by init, system_server and Settings, none of which are
+// app processes, so they keep the real values. Only the property callback path
+// applies these, like the dynamic tables above.
+static const PropOverride kDroidGuardValueProps[] = {
+    {"init.svc.adbd", "stopped"},
+    {"sys.usb.state", "mtp"},
+    {nullptr, nullptr}
+};
+
+static const DynamicSuffixOverride* find_dynamic_suffix_override(const char* name) {
+    if (strncmp(name, "ro.", 3) != 0) return nullptr;
+    size_t len = strlen(name);
+    for (const DynamicSuffixOverride* o = kDynamicSuffixProps; o->suffix; ++o) {
+        if (len > o->suffix_len && strcmp(name + len - o->suffix_len, o->suffix) == 0) return o;
+    }
+    return nullptr;
+}
+
+// The staging props only exist to feed the DroidGuard overrides above. Hide them
+// from every other app process so a plain getprop can't reveal them; the override
+// lookup itself runs inside DroidGuard and still reads them.
+#define PIF_STAGING_PROP_PREFIX "persist.sys.pif."
+
+static bool is_hidden_staging_prop(const char* name) {
+    return strncmp(name, PIF_STAGING_PROP_PREFIX, sizeof(PIF_STAGING_PROP_PREFIX) - 1) == 0 &&
+           !is_droidguard_process();
+}
+
+// Entries from the PIF config that the tables above don't cover: exact property names and
+// leading-* suffix wildcards, like PIFork's jsonProps. AxSpoofManager stages them as
+// persist.sys.pif.x.<i> = "name=value" ("*suffix=value" for a wildcard), sorted by key, with
+// persist.sys.pif.x.count saying how many slots are live. Keep the names and the slot limit
+// in sync with AxSpoofManager.
+//
+// Like PIFork an exact match beats every wildcard, and the first matching wildcard wins.
+// A bare "*" is ignored, since it would match every property. Only called from the
+// DroidGuard process, and never for the staging props themselves.
+#define PIF_CUSTOM_COUNT_PROP "persist.sys.pif.x.count"
+#define PIF_CUSTOM_SLOT_PREFIX "persist.sys.pif.x."
+#define PIF_CUSTOM_SLOT_MAX 32
+
+static const char* find_custom_prop_override(const char* name, char* buffer, bool wildcard) {
+    if (strncmp(name, PIF_STAGING_PROP_PREFIX, sizeof(PIF_STAGING_PROP_PREFIX) - 1) == 0) {
+        return nullptr;
+    }
+    // This code is also linked into the loader, so stick to plain string operations.
+    char raw[PROP_VALUE_MAX];
+    if (__system_property_get(PIF_CUSTOM_COUNT_PROP, raw) <= 0) return nullptr;
+    int count = 0;
+    for (const char* c = raw; *c >= '0' && *c <= '9' && count < 1000; ++c) {
+        count = count * 10 + (*c - '0');
+    }
+    if (count > PIF_CUSTOM_SLOT_MAX) count = PIF_CUSTOM_SLOT_MAX;
+
+    const size_t name_len = strlen(name);
+    char slot[sizeof(PIF_CUSTOM_SLOT_PREFIX) + 3];
+    memcpy(slot, PIF_CUSTOM_SLOT_PREFIX, sizeof(PIF_CUSTOM_SLOT_PREFIX) - 1);
+    for (int i = 0; i < count; ++i) {
+        char* p = slot + sizeof(PIF_CUSTOM_SLOT_PREFIX) - 1;
+        if (i >= 10) *p++ = static_cast<char>('0' + i / 10);
+        *p++ = static_cast<char>('0' + i % 10);
+        *p = '\0';
+
+        char entry[PROP_VALUE_MAX];
+        if (__system_property_get(slot, entry) <= 0) continue;
+        char* eq = entry;
+        while (*eq && *eq != '=') ++eq;
+        if (*eq != '=') continue;
+        *eq = '\0';
+        const char* key = entry;
+        const char* value = eq + 1;
+
+        bool match;
+        if (key[0] == '*') {
+            if (!wildcard) continue;
+            const size_t suffix_len = strlen(key + 1);
+            match = suffix_len > 0 && name_len >= suffix_len &&
+                    strcmp(name + name_len - suffix_len, key + 1) == 0;
+        } else {
+            if (wildcard) continue;
+            match = strcmp(key, name) == 0;
+        }
+        if (!match) continue;
+        strcpy(buffer, value);
+        return buffer;
+    }
+    return nullptr;
+}
+
 bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
     if (!name || !value) return false;
     if (reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (reinterpret_cast<uintptr_t>(value) < 0x1000000) return false;
     if (!is_app_process()) return false;
+    if (is_hidden_staging_prop(name)) { value[0] = '\0'; return true; }
     for (const char* const* p = kSpoofedEmptyProps; *p; ++p) {
         if (strcmp(name, *p) == 0) { value[0] = '\0'; return true; }
     }
@@ -771,6 +935,7 @@ bool custom_rom_hide_should_spoof_prop(const char* name, char* value) {
 bool custom_rom_hide_should_hide_prop(const char* name) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return false;
     if (!is_app_process()) return false;
+    if (is_hidden_staging_prop(name)) return true;
     for (const char* const* p = kSpoofedEmptyProps; *p; ++p) {
         if (strcmp(name, *p) == 0) return true;
     }
@@ -780,11 +945,18 @@ bool custom_rom_hide_should_hide_prop(const char* name) {
 const char* custom_rom_hide_get_prop_override(const char* name, char* buffer) {
     if (!name || reinterpret_cast<uintptr_t>(name) < 0x1000000) return nullptr;
     if (!is_app_process()) return nullptr;
+    // is_droidguard_process() is cached per pid once the process name is final.
+    const bool droidguard = is_droidguard_process();
+    // An exact entry from the PIF config wins over everything below, as in PIFork.
+    if (droidguard) {
+        if (const char* v = find_custom_prop_override(name, buffer, false)) return v;
+    }
     for (const PropOverride* o = kSpoofedValueProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) return o->value;
     }
     for (const DynamicPropOverride* o = kDynamicProductProps; o->name; ++o) {
         if (strcmp(name, o->name) == 0) {
+            if (!droidguard) return nullptr;
             // This code is also linked into the loader, which cannot contain ELF TLS.
             // The caller owns a PROP_VALUE_MAX buffer for the duration of the read.
             int len = __system_property_get(o->staging_name, buffer);
@@ -792,6 +964,18 @@ const char* custom_rom_hide_get_prop_override(const char* name, char* buffer) {
             return nullptr; // staging prop unset — leave the real value alone
         }
     }
+    if (const DynamicSuffixOverride* o = find_dynamic_suffix_override(name)) {
+        if (!droidguard) return nullptr;
+        int len = __system_property_get(o->staging_name, buffer);
+        if (len > 0) return buffer;
+    }
+    for (const PropOverride* o = kDroidGuardValueProps; o->name; ++o) {
+        if (strcmp(name, o->name) == 0) {
+            return droidguard ? o->value : nullptr;
+        }
+    }
+    // Wildcard entries from the PIF config apply last, after the fixed tables.
+    if (droidguard) return find_custom_prop_override(name, buffer, true);
     return nullptr;
 }
 
