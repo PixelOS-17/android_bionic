@@ -809,8 +809,34 @@ static const DynamicPropOverride kDynamicProductProps[] = {
     {"ro.product.vendor.manufacturer", "persist.sys.pif.product.manufacturer"},
     {"ro.product.vendor.brand",        "persist.sys.pif.product.brand"},
     {"ro.product.vendor.model",        "persist.sys.pif.product.model"},
+    {"ro.build.product",               "persist.sys.pif.product.device"},
+    {"ro.build.description",           "persist.sys.pif.build.description"},
+    {"ro.build.flavor",                "persist.sys.pif.build.flavor"},
     {nullptr, nullptr}
 };
+
+// ro.product.<partition>.<field> for every partition (system, vendor, odm, product,
+// system_ext, the *_dlkm ones, ...), served from the same staged product identity as the
+// table above. A stock Pixel reports one identity on all of them, and the ROM's own device
+// and name would otherwise show through on the partitions that table doesn't list.
+static const char* find_product_partition_staging(const char* name) {
+    static const char kPrefix[] = "ro.product.";
+    if (strncmp(name, kPrefix, sizeof(kPrefix) - 1) != 0) return nullptr;
+    const char* partition = name + sizeof(kPrefix) - 1;
+    const char* dot = partition;
+    while (*dot && *dot != '.') ++dot;
+    if (dot == partition || *dot != '.') return nullptr;  // needs "<partition>.<field>"
+    const char* field = dot + 1;
+    for (const char* c = field; *c; ++c) {
+        if (*c == '.') return nullptr;
+    }
+    if (strcmp(field, "manufacturer") == 0) return "persist.sys.pif.product.manufacturer";
+    if (strcmp(field, "brand") == 0) return "persist.sys.pif.product.brand";
+    if (strcmp(field, "model") == 0) return "persist.sys.pif.product.model";
+    if (strcmp(field, "device") == 0) return "persist.sys.pif.product.device";
+    if (strcmp(field, "name") == 0) return "persist.sys.pif.product.name";
+    return nullptr;
+}
 
 // PIFork's leading-* wildcard properties: every read-only prop ending in the
 // suffix is served the same staged value, so partitions the table above would
@@ -824,6 +850,12 @@ static const DynamicSuffixOverride kDynamicSuffixProps[] = {
     DYNAMIC_SUFFIX(".build.id",        "persist.sys.pif.build.id"),
     DYNAMIC_SUFFIX(".security_patch",  "persist.sys.pif.security_patch"),
     DYNAMIC_SUFFIX("api_level",        "persist.sys.pif.api_level"),
+    // ro.build.version.real_security_patch, which ".security_patch" does not reach.
+    DYNAMIC_SUFFIX(".real_security_patch", "persist.sys.pif.security_patch"),
+    // The build type and tags of the partitions kSpoofedValueProps doesn't pin (odm, product,
+    // system_ext, bootimage, ...), taken from the fingerprint instead of a fixed value.
+    DYNAMIC_SUFFIX(".build.type",      "persist.sys.pif.build.type"),
+    DYNAMIC_SUFFIX(".build.tags",      "persist.sys.pif.build.tags"),
     {nullptr, 0, nullptr}
 };
 
@@ -963,6 +995,12 @@ const char* custom_rom_hide_get_prop_override(const char* name, char* buffer) {
             if (len > 0) return buffer;
             return nullptr; // staging prop unset — leave the real value alone
         }
+    }
+    if (const char* staging = find_product_partition_staging(name)) {
+        if (!droidguard) return nullptr;
+        int len = __system_property_get(staging, buffer);
+        if (len > 0) return buffer;
+        return nullptr;
     }
     if (const DynamicSuffixOverride* o = find_dynamic_suffix_override(name)) {
         if (!droidguard) return nullptr;
