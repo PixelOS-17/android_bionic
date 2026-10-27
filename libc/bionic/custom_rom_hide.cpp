@@ -246,10 +246,16 @@ static bool read_cmdline_name(char* out, size_t out_size) {
 
 static bool name_is_zygote(const char* name) {
     size_t len = strlen(name);
+    // Android 17's app zygote is com.android.chrome_zygote_native. That does
+    // not end in "_zygote", and its SELinux domain is zygote_next.
+    static const char kNativeZygoteSuffix[] = "_zygote_native";
+    size_t nlen = sizeof(kNativeZygoteSuffix) - 1;
+    if (len >= nlen && strcmp(name + len - nlen, kNativeZygoteSuffix) == 0) return true;
     static const char kZygoteSuffix[] = "_zygote";
     size_t slen = sizeof(kZygoteSuffix) - 1;
     if (len >= slen && strcmp(name + len - slen, kZygoteSuffix) == 0) return true;
     if (strcmp(name, "zygote") == 0 || strcmp(name, "zygote64") == 0) return true;
+    if (strcmp(name, "zygote_next") == 0) return true;
     if (strcmp(name, "usap32") == 0 || strcmp(name, "usap64") == 0) return true;
     return false;
 }
@@ -259,6 +265,13 @@ static bool compute_exempt(bool* is_zygote) {
 
     char name[256];
     if (!read_cmdline_name(name, sizeof(name))) return false;
+
+    // Before setArgV0 the name is this placeholder. Caching "not a zygote"
+    // here would keep the sepolicy filter on after the real name is set.
+    if (strcmp(name, "<pre-initialized>") == 0) {
+        *is_zygote = true;
+        return true;
+    }
 
     if (name_is_zygote(name)) { *is_zygote = true; return true; }
 
