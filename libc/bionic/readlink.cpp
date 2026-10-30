@@ -26,32 +26,11 @@
  * SUCH DAMAGE.
  */
 
-#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include "custom_rom_hide.h"
-
-extern "C" ssize_t __readlinkat(int, const char*, char*, size_t);
 
 ssize_t readlink(const char* path, char* buf, size_t size) {
-  if (custom_rom_hide_should_block(path)) {
-    errno = ENOENT;
-    return -1;
-  }
   return readlinkat(AT_FDCWD, path, buf, size);
-}
-
-ssize_t readlinkat(int dirfd, const char* path, char* buf, size_t size) {
-  if (custom_rom_hide_should_block_at(dirfd, path)) {
-    errno = ENOENT;
-    return -1;
-  }
-
-  ssize_t ret = __readlinkat(dirfd, path, buf, size);
-  return custom_rom_hide_readlink_post(buf, size, ret);
 }
