@@ -803,19 +803,11 @@ static bool is_selinux_policy_path(const char* path) {
         || strstr(base, "sepolicy.cil") != nullptr;
 }
 
-static bool line_has_rom_keyword(const char* line) {
-    for (const PrefixEntry* kw = kProcFilterKeywords; kw->str; ++kw) {
-        if (strstr(line, kw->str) != nullptr) return true;
-    }
-    return false;
-}
-
 static bool drop_sepolicy_line(const char* line, void*) {
-    return line_has_rom_keyword(line);
+    return name_has_rom_keyword(line);
 }
 
 int custom_rom_hide_filter_sepolicy(const char* path) {
-    if (!path) return -1;
     if (!is_app_process()) return -1;
     if (!path || reinterpret_cast<uintptr_t>(path) < 0x1000000) return -1;
 
