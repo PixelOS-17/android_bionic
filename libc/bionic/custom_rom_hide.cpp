@@ -934,6 +934,7 @@ static const DynamicPropOverride kDynamicProductProps[] = {
     {"ro.product.vendor.brand",        "persist.sys.pif.product.brand"},
     {"ro.product.vendor.model",        "persist.sys.pif.product.model"},
     {"ro.build.product",               "persist.sys.pif.product.device"},
+    {"ro.build.display.id",            "persist.sys.pif.build.id"},
     {"ro.build.description",           "persist.sys.pif.build.description"},
     {"ro.build.flavor",                "persist.sys.pif.build.flavor"},
     {nullptr, nullptr}
