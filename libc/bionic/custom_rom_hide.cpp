@@ -260,91 +260,61 @@ static bool name_is_zygote(const char* name) {
     return false;
 }
 
-static bool compute_exempt(bool* is_zygote) {
-    *is_zygote = false;
+// The process name is only final once ActivityThread has called Process.setArgV0(),
+// before that cmdline still reads a zygote or usap name, or "<pre-initialized>".
+// A usap keeps its pid when it becomes an app, so nothing is cached for this pid
+// until the name is final.
+#define DROIDGUARD_PROCESS_NAME "com.google.android.gms.unstable"
+
+#define PROC_STATE_APP (1u << 0)
+#define PROC_STATE_DROIDGUARD (1u << 1)
+#define PROC_STATE_CACHED (1u << 2)
+
+// pid in the upper 32 bits, PROC_STATE_* in the lower ones.
+static _Atomic(uint64_t) g_proc_state;
+
+static uint32_t compute_proc_state() {
+    if ((getuid() % AID_USER_OFFSET) < AID_APP_START) return 0;
 
     char name[256];
-    if (!read_cmdline_name(name, sizeof(name))) return false;
+    if (!read_cmdline_name(name, sizeof(name))) return PROC_STATE_APP;
+    if (strcmp(name, "<pre-initialized>") == 0 || name_is_zygote(name)) return 0;
 
-    // Before setArgV0 the name is this placeholder. Caching "not a zygote"
-    // here would keep the sepolicy filter on after the real name is set.
-    if (strcmp(name, "<pre-initialized>") == 0) {
-        *is_zygote = true;
-        return true;
-    }
-
-    if (name_is_zygote(name)) { *is_zygote = true; return true; }
-
+    uint32_t state = PROC_STATE_APP | PROC_STATE_CACHED;
     for (const char* const* p = kAllowlistedPackages; *p; ++p) {
-        if (strcmp(name, *p) == 0) return true;
+        if (strcmp(name, *p) == 0) {
+            state &= ~PROC_STATE_APP;
+            break;
+        }
     }
-    return false;
+    if (strcmp(name, DROIDGUARD_PROCESS_NAME) == 0) state |= PROC_STATE_DROIDGUARD;
+    return state;
 }
 
-static bool is_exempt_process() {
-    static pid_t cached_pid = -1;
-    static bool cached_value = false;
-    pid_t cur = getpid();
-    if (cur == cached_pid) return cached_value;
-
-    bool is_zygote = false;
-    bool result = compute_exempt(&is_zygote);
-
-    if (!is_zygote) {
-        cached_value = result;
-        cached_pid = cur;
+static uint32_t get_proc_state() {
+    uint32_t pid = static_cast<uint32_t>(getpid());
+    uint64_t cached = atomic_load_explicit(&g_proc_state, memory_order_acquire);
+    if ((cached >> 32) == pid && (cached & PROC_STATE_CACHED) != 0) {
+        return static_cast<uint32_t>(cached);
     }
-    return result;
+
+    int saved_errno = errno;
+    uint32_t state = compute_proc_state();
+    errno = saved_errno;
+    if ((state & PROC_STATE_CACHED) != 0) {
+        atomic_store_explicit(&g_proc_state, (static_cast<uint64_t>(pid) << 32) | state,
+                              memory_order_release);
+    }
+    return state;
 }
 
 static bool is_app_process() {
-    if ((getuid() % AID_USER_OFFSET) < AID_APP_START) return false;
-    if (is_exempt_process()) return false;
-    return true;
+    return (get_proc_state() & PROC_STATE_APP) != 0;
 }
 
 // Dynamic prop overrides are only meant for DroidGuard, mirroring PIFork's scope.
-// The process name is only final once ActivityThread has called Process.setArgV0(),
-// before that cmdline still reads "zygote*" or "<pre-initialized>". Only cache
-// once it is final so an early read can't pin the wrong answer for this pid.
-#define DROIDGUARD_PROCESS_NAME "com.google.android.gms.unstable"
-
-static bool compute_droidguard(bool* resolved) {
-    *resolved = false;
-
-    int fd = raw_openat("/proc/self/cmdline", O_RDONLY);
-    if (fd < 0) return false;
-
-    char cmdline[256];
-    ssize_t n = raw_read(fd, cmdline, sizeof(cmdline) - 1);
-    raw_close(fd);
-    if (n <= 0) return false;
-
-    cmdline[n] = '\0';
-    if (strncmp(cmdline, "zygote", 6) == 0 || strcmp(cmdline, "<pre-initialized>") == 0) {
-        return false;
-    }
-
-    *resolved = true;
-    return strcmp(cmdline, DROIDGUARD_PROCESS_NAME) == 0;
-}
-
 static bool is_droidguard_process() {
-    static _Atomic(pid_t) cached_pid = -1;
-    static _Atomic(bool) cached_value = false;
-
-    pid_t cur = getpid();
-    if (atomic_load_explicit(&cached_pid, memory_order_acquire) == cur) {
-        return atomic_load_explicit(&cached_value, memory_order_acquire);
-    }
-
-    bool resolved = false;
-    bool result = compute_droidguard(&resolved);
-    if (resolved) {
-        atomic_store_explicit(&cached_value, result, memory_order_release);
-        atomic_store_explicit(&cached_pid, cur, memory_order_release);
-    }
-    return result;
+    return (get_proc_state() & PROC_STATE_DROIDGUARD) != 0;
 }
 
 static const char* path_basename(const char* path) {
