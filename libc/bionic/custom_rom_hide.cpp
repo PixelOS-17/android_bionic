@@ -753,14 +753,16 @@ static const MountDm kMountDm[] = {
     { nullptr,         nullptr },
 };
 
-static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, void*) {
+static void mark_mount_line_ro(char* line) {
     char* rw_delim = strstr(line, ",rw,");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
     rw_delim = strstr(line, " rw,");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
     rw_delim = strstr(line, ",rw ");
     if (rw_delim) { rw_delim[1] = 'r'; rw_delim[2] = 'o'; }
+}
 
+static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, void*) {
     if (!strstr(line, "/dev/block/loop")) {
         const char* replacement = nullptr;
         for (const MountDm* m = kMountDm; m->mnt; ++m) {
@@ -772,6 +774,7 @@ static void write_spoofed_mount_line(int mem_fd, char* line, size_t line_len, vo
             replacement = "/dev/block/dm-0";
 
         if (replacement) {
+            mark_mount_line_ro(line);
             char* dev_start = strstr(line, "/dev/block/");
             if (!dev_start) dev_start = strstr(line, "/dev/root");
 
