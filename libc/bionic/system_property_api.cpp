@@ -32,6 +32,7 @@
 #include <system_properties/prop_area.h>
 #include <system_properties/system_properties.h>
 
+#include "droidguard_props.h"
 #include "private/bionic_defs.h"
 
 static SystemProperties system_properties;
@@ -74,12 +75,29 @@ int __system_property_read(const prop_info* pi, char* name, char* value) {
   return system_properties.Read(pi, name, value);
 }
 
+struct DroidGuardReadCtx {
+  void (*callback)(void* cookie, const char* name, const char* value, uint32_t serial);
+  void* cookie;
+};
+
+static void droidguard_read_callback(void* cookie, const char* name, const char* value,
+                                     uint32_t serial) {
+  auto* ctx = static_cast<DroidGuardReadCtx*>(cookie);
+  char buffer[PROP_VALUE_MAX];
+  const char* override_value = droidguard_prop_override(name, buffer);
+  ctx->callback(ctx->cookie, name, override_value != nullptr ? override_value : value, serial);
+}
+
 __BIONIC_WEAK_FOR_NATIVE_BRIDGE
 void __system_property_read_callback(const prop_info* pi,
                                      void (*callback)(void* cookie, const char* name,
                                                       const char* value, uint32_t serial),
                                      void* cookie) {
-  return system_properties.ReadCallback(pi, callback, cookie);
+  if (!droidguard_is_current_process()) {
+    return system_properties.ReadCallback(pi, callback, cookie);
+  }
+  DroidGuardReadCtx ctx{callback, cookie};
+  return system_properties.ReadCallback(pi, droidguard_read_callback, &ctx);
 }
 
 __BIONIC_WEAK_FOR_NATIVE_BRIDGE

@@ -929,6 +929,7 @@ cc_library_static {
         "bionic/ctype.cpp",
         "bionic/dirent.cpp",
         "bionic/div.cpp",
+        "bionic/droidguard_props.cpp",
         "bionic/dup.cpp",
         "bionic/endian.cpp",
         "bionic/env.cpp",
