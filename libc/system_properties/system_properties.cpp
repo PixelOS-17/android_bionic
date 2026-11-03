@@ -200,6 +200,15 @@ static bool is_appcompat_override(const char* name) {
   return strncmp(name, APPCOMPAT_PREFIX, strlen(APPCOMPAT_PREFIX)) == 0;
 }
 
+// Find returns the override prop_info for the name the caller asked for.
+// Its stored name still has the prefix.
+static const char* NameForRead(bool overrides_enabled, const char* stored_name) {
+  if (overrides_enabled && is_appcompat_override(stored_name)) {
+    return stored_name + sizeof(APPCOMPAT_PREFIX) - 1;
+  }
+  return stored_name;
+}
+
 static bool is_read_only(const char* name) {
   return strncmp(name, "ro.", 3) == 0;
 }
@@ -237,14 +246,15 @@ uint32_t SystemProperties::ReadMutablePropertyValue(const prop_info* pi, char* v
 
 int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
   uint32_t serial = ReadMutablePropertyValue(pi, value);
+  const char* reported = NameForRead(use_appcompat_override_, pi->name);
   if (name != nullptr) {
-    size_t namelen = strlcpy(name, pi->name, PROP_NAME_MAX);
+    size_t namelen = strlcpy(name, reported, PROP_NAME_MAX);
     if (namelen >= PROP_NAME_MAX) {
       async_safe_format_log(ANDROID_LOG_ERROR, "libc",
                             "The property name length for \"%s\" is >= %d;"
                             " please use __system_property_read_callback"
                             " to read this property. (the name is truncated to \"%s\")",
-                            pi->name, PROP_NAME_MAX - 1, name);
+                            reported, PROP_NAME_MAX - 1, name);
     }
   }
   if (is_read_only(pi->name) && pi->is_long()) {
@@ -253,7 +263,7 @@ int SystemProperties::Read(const prop_info* pi, char* name, char* value) {
         "The property \"%s\" has a value with length %zu that is too large for"
         " __system_property_get()/__system_property_read(); use"
         " __system_property_read_callback() instead.",
-        pi->name, strlen(pi->long_value()));
+        reported, strlen(pi->long_value()));
   }
   return SERIAL_VALUE_LEN(serial);
 }
@@ -262,21 +272,22 @@ void SystemProperties::ReadCallback(const prop_info* pi,
                                     void (*callback)(void* cookie, const char* name,
                                                      const char* value, uint32_t serial),
                                     void* cookie) {
+  const char* reported = NameForRead(use_appcompat_override_, pi->name);
   // Read only properties don't need to copy the value to a temporary buffer, since it can never
   // change.  We use relaxed memory order on the serial load for the same reason.
   if (is_read_only(pi->name)) {
     uint32_t serial = load_const_atomic(&pi->serial, memory_order_relaxed);
     if (pi->is_long()) {
-      callback(cookie, pi->name, pi->long_value(), serial);
+      callback(cookie, reported, pi->long_value(), serial);
     } else {
-      callback(cookie, pi->name, pi->value, serial);
+      callback(cookie, reported, pi->value, serial);
     }
     return;
   }
 
   char value_buf[PROP_VALUE_MAX];
   uint32_t serial = ReadMutablePropertyValue(pi, value_buf);
-  callback(cookie, pi->name, value_buf, serial);
+  callback(cookie, reported, value_buf, serial);
 }
 
 int SystemProperties::Get(const char* name, char* value) {
