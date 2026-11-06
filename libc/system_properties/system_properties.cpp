@@ -306,16 +306,27 @@ int SystemProperties::Update(prop_info* pi, const char* value, unsigned int len)
   if (!serial_pa) {
     return -1;
   }
+  // The override area keys this twin by the name with the prefix removed.
+  const char* override_name = pi->name;
+  if (have_override && is_appcompat_override(pi->name)) {
+    override_name += strlen(APPCOMPAT_PREFIX);
+  }
   prop_area* pa = contexts_->GetPropAreaForName(pi->name);
   prop_area* override_pa =
-      have_override ? appcompat_override_contexts_->GetPropAreaForName(pi->name) : nullptr;
+      have_override ? appcompat_override_contexts_->GetPropAreaForName(override_name) : nullptr;
   if (__predict_false(!pa)) {
     async_safe_format_log(ANDROID_LOG_ERROR, "libc", "Could not find area for \"%s\"", pi->name);
     return -1;
   }
   CHECK(!have_override || (override_pa && override_serial_pa));
 
-  auto* override_pi = const_cast<prop_info*>(have_override ? override_pa->find(pi->name) : nullptr);
+  auto* override_pi =
+      const_cast<prop_info*>(have_override ? override_pa->find(override_name) : nullptr);
+  if (have_override && override_pi == nullptr) {
+    async_safe_format_log(ANDROID_LOG_ERROR, "libc",
+                          "Could not find appcompat override property \"%s\"", override_name);
+    have_override = false;
+  }
 
   uint32_t serial = atomic_load_explicit(&pi->serial, memory_order_relaxed);
   unsigned int old_len = SERIAL_VALUE_LEN(serial);
